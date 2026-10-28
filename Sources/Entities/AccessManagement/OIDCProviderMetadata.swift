@@ -234,6 +234,7 @@ public struct OIDCProviderMetadata: Codable, Equatable, Sendable {
   public static func == (lhs: OIDCProviderMetadata, rhs: OIDCProviderMetadata) -> Bool {
     lhs.authorizationEndpoint == rhs.authorizationEndpoint
   }
+
 }
 
 // MARK: - MtlsEndpointAliases

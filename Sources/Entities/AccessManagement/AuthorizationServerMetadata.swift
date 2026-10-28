@@ -168,5 +168,4 @@ public struct AuthorizationServerMetadata: Codable, Equatable, Sendable {
     self.clientAttestationSigningAlgValuesSupported = clientAttestationSigningAlgValuesSupported
     self.clientAttestationPopSigningAlgValuesSupported = clientAttestationPopSigningAlgValuesSupported
   }
-  
 }

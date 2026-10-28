@@ -27,6 +27,15 @@ public enum IdentityAndAccessManagementMetadata: Sendable {
       return metaData.issuer
     }
   }
+
+  var authorizationResponseIssParameterSupported: Bool {
+    switch self {
+    case .oidc(let metaData):
+      return metaData.authorizationResponseIssParameterSupported ?? false
+    case .oauth(let metaData):
+      return metaData.authorizationResponseIssParameterSupported ?? false
+    }
+  }
   
   var authorizationServerSupportsPar: Bool {
     switch self {
@@ -96,6 +105,15 @@ public enum IdentityAndAccessManagementMetadata: Sendable {
       return metaData.clientAttestationPopSigningAlgValuesSupported?.map { JWSAlgorithm(name: $0) } ?? []
     case .oauth(let metaData):
       return metaData.clientAttestationPopSigningAlgValuesSupported?.map { JWSAlgorithm(name: $0) } ?? []
+    }
+  }
+
+  public var clientAttestationSigningAlgValuesSupported: [JWSAlgorithm] {
+    switch self {
+    case .oidc(let metaData):
+      return metaData.clientAttestationSigningAlgValuesSupported?.map { JWSAlgorithm(name: $0) } ?? []
+    case .oauth(let metaData):
+      return metaData.clientAttestationSigningAlgValuesSupported?.map { JWSAlgorithm(name: $0) } ?? []
     }
   }
 

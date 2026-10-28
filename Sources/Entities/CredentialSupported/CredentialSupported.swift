@@ -66,11 +66,15 @@ public extension CredentialSupported {
     requester: IssuanceRequesterType,
     proofs: [Proof] = [],
     issuancePayload: IssuanceRequestPayload,
+    requestEncryptionSpec: EncryptionSpec? = nil,
+    walletResponseEncryptionPolicy: CredentialResponseEncryptionPolicy = .supported,
     responseEncryptionSpecProvider: (_ issuerResponseEncryptionMetadata: CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
   ) throws -> CredentialIssuanceRequest {
     
     let (issuerEncryption, responseEncryptionSpec) = try validateAndPrepareEncryption(
       requester: requester,
+      requestEncryptionSpec: requestEncryptionSpec,
+      walletResponseEncryptionPolicy: walletResponseEncryptionPolicy,
       responseEncryptionSpecProvider: responseEncryptionSpecProvider
     )
     
@@ -97,11 +101,30 @@ public extension CredentialSupported {
   
   private func validateAndPrepareEncryption(
     requester: IssuanceRequesterType,
+    requestEncryptionSpec: EncryptionSpec?,
+    walletResponseEncryptionPolicy: CredentialResponseEncryptionPolicy,
     responseEncryptionSpecProvider: (CredentialResponseEncryption) -> IssuanceResponseEncryptionSpec?
   ) throws -> (CredentialResponseEncryption, IssuanceResponseEncryptionSpec?) {
     let issuerEncryption = requester.issuerMetadata.credentialResponseEncryption
     let responseEncryptionSpec = responseEncryptionSpecProvider(issuerEncryption)
-    
+    // Wallet mandates response encryption: the issuer must support it and a spec must exist.
+    if case .required = walletResponseEncryptionPolicy {
+      if issuerEncryption.notSupported {
+        throw CredentialIssuanceError.responseEncryptionRequiredByWalletButNotSupportedByIssuer
+      }
+      if responseEncryptionSpec == nil {
+        throw CredentialIssuanceError.responseEncryptionRequiredByWalletButSpecMissing
+      }
+    }
+    // Wallet asking for an encrypted response must also encrypt its own request.
+    if !issuerEncryption.notSupported, responseEncryptionSpec != nil, requestEncryptionSpec == nil {
+      throw CredentialIssuanceError.responseEncryptionRequiresRequestEncryption
+    }
+    // Issuer mandates response encryption but wallet supplied no spec — fail closed.
+    if case .required = issuerEncryption, responseEncryptionSpec == nil {
+      throw CredentialIssuanceError.responseEncryptionRequiredByIssuerButSpecMissing
+    }
+
     if let responseEncryptionSpec {
       switch issuerEncryption {
       case .notSupported:
@@ -207,10 +230,14 @@ public struct ConfigurationCredentialMetadata: Codable, Sendable {
     let claims = try json["claims"].array?.compactMap({ try Claim(json: $0)}) ?? []
     self.claims = claims
     
-    if let policyJson = json["credential_reuse_policy"].dictionaryObject,
-       let policyData = try? JSONSerialization.data(withJSONObject: policyJson),
-       let reusePolicy = try? JSONDecoder().decode(CredentialReusePolicy.self, from: policyData) {
-      self.credentialReusePolicy = reusePolicy
+    if let policyJson = json["credential_reuse_policy"].dictionaryObject {
+      do {
+        let policyData = try JSONSerialization.data(withJSONObject: policyJson)
+        self.credentialReusePolicy = try JSONDecoder().decode(CredentialReusePolicy.self, from: policyData)
+      } catch {
+        print("ConfigurationCredentialMetadata: failed to parse credential_reuse_policy: \(error)")
+        self.credentialReusePolicy = nil
+      }
     } else {
       self.credentialReusePolicy = nil
     }

@@ -22,7 +22,7 @@ import JOSESwift
 class IssuanceEncryptionTest: XCTestCase {
   
   let config: OpenId4VCIConfig = .init(
-    client: .public(id: WALLET_DEV_CLIENT_ID),
+    client: attestionClient,
     authFlowRedirectionURI: URL(string: "urn:ietf:wg:oauth:2.0:oob")!,
     authorizeIssuanceConfig: .favorScopes
   )
@@ -50,7 +50,7 @@ class IssuanceEncryptionTest: XCTestCase {
     )
     
     let keyBindingKey: BindingKey = try! .jwtKeyAttestation(
-      algorithm: .init(.ES256),
+      algorithm: .init(.RS256),
       keyAttestationJWT: { _ in
         try! .init(
           jws: .init(
@@ -58,7 +58,7 @@ class IssuanceEncryptionTest: XCTestCase {
           )
         )
       },
-      keyIndex: 1,
+      keyIndex: 0,
       privateKey: .secKey(privateKey)
     )
     
@@ -116,7 +116,7 @@ class IssuanceEncryptionTest: XCTestCase {
     )
     
     let keyBindingKey: BindingKey = try! .jwtKeyAttestation(
-      algorithm: .init(.ES256),
+      algorithm: .init(.RS256),
       keyAttestationJWT: { _ in
         try! .init(
           jws: .init(
@@ -124,7 +124,7 @@ class IssuanceEncryptionTest: XCTestCase {
           )
         )
       },
-      keyIndex: 1,
+      keyIndex: 0,
       privateKey: .secKey(privateKey)
     )
     
@@ -169,7 +169,7 @@ class IssuanceEncryptionTest: XCTestCase {
     
     let privateKey = try KeyController.generateRSAPrivateKey()
     let keyBindingKey: BindingKey = try! .jwtKeyAttestation(
-      algorithm: .init(.ES256),
+      algorithm: .init(.RS256),
       keyAttestationJWT: { _ in
         try! .init(
           jws: .init(
@@ -177,7 +177,7 @@ class IssuanceEncryptionTest: XCTestCase {
           )
         )
       },
-      keyIndex: 1,
+      keyIndex: 0,
       privateKey: .secKey(privateKey)
     )
     
@@ -239,6 +239,12 @@ extension IssuanceEncryptionTest {
           extension: "json"
         )
       ),
+      noncePoster: Poster(
+        session: NetworkingMock(
+          path: "mock_cnonce_endpoint_response",
+          extension: "json"
+        )
+      ),
       dpopConstructor: dpopConstructor(
         algorithms: offer.authorizationServerMetadata.dpopSigningAlgValuesSupported
       )
@@ -248,19 +254,20 @@ extension IssuanceEncryptionTest {
       XCTAssert(false, "Unable to create request")
       return nil
     }
-    
+
       guard let authorizedRequest = try? await issuer.authorizeWithAuthorizationCode(
         serverState: parRequested.state,
         request: parRequested,
         authorizationCode: AuthorizationCode(value: UUID().uuidString),
-        grant: offer.grants!
+        grant: offer.grants!,
+        issuerFromRedirect: parRequested.expectedIssuer
       ) else {
         XCTAssert(false, "Could not get authorized request")
         return nil
       }
       return (authorizedRequest, issuer)
   }
-  
+
   private func initIssuerWithOfferAndAuthorizeRequesterGenericError(
     issuanceResponseEncryptionSpec: IssuanceResponseEncryptionSpec
   ) async throws -> (AuthorizedRequest, Issuer)? {
@@ -292,6 +299,12 @@ extension IssuanceEncryptionTest {
           extension: "json"
         )
       ),
+      noncePoster: Poster(
+        session: NetworkingMock(
+          path: "mock_cnonce_endpoint_response",
+          extension: "json"
+        )
+      ),
       dpopConstructor: dpopConstructor(
         algorithms: offer.authorizationServerMetadata.dpopSigningAlgValuesSupported
       )
@@ -301,12 +314,13 @@ extension IssuanceEncryptionTest {
       XCTAssert(false, "Unable to create request")
       return nil
     }
-    
+
       guard let authorizedRequest = try? await issuer.authorizeWithAuthorizationCode(
         serverState: parRequested.state,
         request: parRequested,
         authorizationCode: AuthorizationCode(value: UUID().uuidString),
-        grant: offer.grants!
+        grant: offer.grants!,
+        issuerFromRedirect: parRequested.expectedIssuer
       ) else {
         XCTAssert(false, "Could not get authorized request")
         return nil

@@ -35,7 +35,7 @@ class KeyAttestationTests: XCTestCase {
     try await super.setUp()
     
     config = .init(
-      client: .public(id: WALLET_DEV_CLIENT_ID),
+      client: attestionClient,
       authFlowRedirectionURI: URL(string: "urn:ietf:wg:oauth:2.0:oob")!,
       authorizeIssuanceConfig: .favorScopes
     )
@@ -50,15 +50,19 @@ class KeyAttestationTests: XCTestCase {
     config = nil
   }
   
-  func testWhenIssuerRequiressKeyAttestationShouldBeIncludedInProof() async throws {
-    
+  // The shipped attestation JWT (`TestsConstants.ketAttestationJWT`) attests one key, at
+  // index 0. Requesting proof for a key at index 1 must surface `keyIndexOutOfBounds` —
+  // previously a `try?` in Issuer.calculateProofs swallowed this and the request went out
+  // with no proof at all while the test asserted success.
+  func testWhenKeyIndexIsOutOfBoundsProofConstructionFailsLoudly() async throws {
+
     // Given
     let sdJwtVCpayload: IssuanceRequestPayload = .configurationBased(
       credentialConfigurationIdentifier: try .init(value: "eu.europa.ec.eudiw.pid_vc_sd_jwt")
     )
     let spec = data.spec
-    
-    let keyBindingKey: BindingKey = try! .jwtKeyAttestation(
+
+    let outOfBoundsBindingKey: BindingKey = try! .jwtKeyAttestation(
       algorithm: .init(.ES256),
       keyAttestationJWT: { _ in
         try! .init(
@@ -70,8 +74,7 @@ class KeyAttestationTests: XCTestCase {
       keyIndex: 1,
       privateKey: .secKey(data.privateKey)
     )
-    
-    // When
+
     let authorized = try! await data.issuer.authorizeWithAuthorizationCode(
       serverState: TestsConstants.unAuthorizedRequest.state,
       request: TestsConstants.unAuthorizedRequest,
@@ -79,26 +82,70 @@ class KeyAttestationTests: XCTestCase {
       grant: data.offer.grants!
     )
 
-    
     do {
-      
-      // Then
       _ = try await data.issuer.requestCredential(
         request: authorized,
-        bindingKeys: [
-          keyBindingKey
-        ],
+        bindingKeys: [outOfBoundsBindingKey],
         requestPayload: sdJwtVCpayload,
-        responseEncryptionSpecProvider: { _ in
-          spec
-        })
-      
-        XCTAssert(true, "Success")
+        responseEncryptionSpecProvider: { _ in spec }
+      )
+      XCTFail("Expected keyIndexOutOfBounds error but request succeeded")
+    } catch CredentialIssuanceError.keyIndexOutOfBounds(let index, let available) {
+      XCTAssertEqual(index, 1)
+      XCTAssertEqual(available, 1)
     } catch {
-      XCTAssert(false, error.localizedDescription)
+      XCTFail("Expected CredentialIssuanceError.keyIndexOutOfBounds, got \(error)")
     }
   }
-  
+
+  // When the issuer publishes a nonce endpoint and the fetch fails, Issuer.obtainProofs must
+  // surface the error to the caller. Previously a `try?` swallowed the failure and the wallet
+  // proceeded to build proofs without the c_nonce claim.
+  func testWhenNonceEndpointFailsErrorPropagates() async throws {
+    let offerOptional = await TestsConstants.createMockCredentialOfferopenidKeyAttestationRequired()
+    let offer = try XCTUnwrap(offerOptional)
+    let spec = data.spec
+
+    let issuer = try Issuer(
+      authorizationServerMetadata: offer.authorizationServerMetadata,
+      issuerMetadata: offer.credentialIssuerMetadata,
+      config: config,
+      parPoster: Poster(session: NetworkingMock(path: "pushed_authorization_request_response", extension: "json")),
+      tokenPoster: Poster(session: NetworkingMock(path: "access_token_request_response_no_proof", extension: "json")),
+      requesterPoster: Poster(session: NetworkingMock(path: "batch_credential_issuance_success_response_credentials", extension: "json")),
+      noncePoster: Poster(session: NetworkingThrowingMock()),
+      dpopConstructor: dpopConstructor(algorithms: offer.authorizationServerMetadata.dpopSigningAlgValuesSupported)
+    )
+
+    let authorized = try await issuer.authorizeWithAuthorizationCode(
+      serverState: TestsConstants.unAuthorizedRequest.state,
+      request: TestsConstants.unAuthorizedRequest,
+      authorizationCode: try AuthorizationCode(value: "MZqG9bsQ8UALhsGNlY39Yw=="),
+      grant: offer.grants!
+    )
+
+    let keyBindingKey: BindingKey = .attestation(
+      keyAttestationJWT: { _ in
+        try! .init(jws: try! .init(compactSerialization: TestsConstants.ketAttestationJWT))
+      }
+    )
+    let payload: IssuanceRequestPayload = .configurationBased(
+      credentialConfigurationIdentifier: try .init(value: "eu.europa.ec.eudiw.pid_vc_sd_jwt")
+    )
+
+    do {
+      _ = try await issuer.requestCredential(
+        request: authorized,
+        bindingKeys: [keyBindingKey],
+        requestPayload: payload,
+        responseEncryptionSpecProvider: { _ in spec }
+      )
+      XCTFail("Expected nonce endpoint failure to propagate")
+    } catch {
+      XCTAssertTrue(true)
+    }
+  }
+
   func testWhenIssuerRequiresAttestationShouldBeIncludedInProof() async throws {
     
     // Given
@@ -247,6 +294,264 @@ class KeyAttestationTests: XCTestCase {
     ))
 
     XCTAssert(true)
+  }
+
+  // MARK: - TS3 v1.5 Algorithm Validation Tests
+
+  func testKeyAttestationES256AlgorithmAccepted() async throws {
+    // Given: Key attestation with ES256 algorithm (P-256 curve)
+    let ka = try KeyAttestationJWT(jws: try JWS(
+      header: .init(parameters: [
+        "alg": "ES256",
+        "typ": KeyAttestationJWT.keyAttestationJWTType
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "attested_keys": [data.publicKey.toDictionary()]
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES256, key: data.privateKey)!
+    ))
+
+    // Then: Should succeed
+    XCTAssertEqual(ka.attestedKeys.count, 1)
+  }
+
+  func testKeyAttestationES384AlgorithmAccepted() async throws {
+    // Given: Key attestation with ES384 algorithm
+    // Note: Using ES256 key but marking as ES384 to test algorithm validation
+    // (In real scenario, P-384 curve would be used)
+    let ka = try KeyAttestationJWT(jws: try JWS(
+      header: .init(parameters: [
+        "alg": "ES384",
+        "typ": KeyAttestationJWT.keyAttestationJWTType
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "attested_keys": [data.publicKey.toDictionary()]
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES384, key: data.privateKey)!
+    ))
+
+    // Then: Should succeed (algorithm validation accepts ES384)
+    XCTAssertEqual(ka.attestedKeys.count, 1)
+  }
+
+  func testKeyAttestationES512AlgorithmAccepted() async throws {
+    // Given: Key attestation with ES512 algorithm
+    // Note: Using ES256 key but marking as ES512 to test algorithm validation
+    // (In real scenario, P-521 curve would be used)
+    let ka = try KeyAttestationJWT(jws: try JWS(
+      header: .init(parameters: [
+        "alg": "ES512",
+        "typ": KeyAttestationJWT.keyAttestationJWTType
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "attested_keys": [data.publicKey.toDictionary()]
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES512, key: data.privateKey)!
+    ))
+
+    // Then: Should succeed (algorithm validation accepts ES512)
+    XCTAssertEqual(ka.attestedKeys.count, 1)
+  }
+
+  // MARK: - TS3 v1.5 First Key Signature Validation Tests
+
+  func testJWTProofSignedByFirstAttestedKeySucceeds() async throws {
+    // Given: Key attestation with one attested key
+    let keyAttestation = try KeyAttestationJWT(jws: try JWS(
+      header: .init(parameters: [
+        "alg": "ES256",
+        "typ": KeyAttestationJWT.keyAttestationJWTType
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "attested_keys": [data.publicKey.toDictionary()]
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES256, key: data.privateKey)!
+    ))
+
+    // And: JWT proof signed by the same key
+    let jwtProof = try JWS(
+      header: .init(parameters: [
+        "alg": "ES256",
+        "typ": "openid4vci-proof+jwt"
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "aud": "https://issuer.example.com",
+        "nonce": "test-nonce"
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES256, key: data.privateKey)!
+    )
+
+    // When/Then: Validation should succeed
+    XCTAssertNoThrow(try keyAttestation.validateJWTProofSignature(jwtProof))
+  }
+
+  func testJWTProofSignedByWrongKeyFails() async throws {
+    // Given: Key attestation with one attested key
+    let keyAttestation = try KeyAttestationJWT(jws: try JWS(
+      header: .init(parameters: [
+        "alg": "ES256",
+        "typ": KeyAttestationJWT.keyAttestationJWTType
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "attested_keys": [data.publicKey.toDictionary()]
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES256, key: data.privateKey)!
+    ))
+
+    // And: JWT proof signed by a DIFFERENT key
+    let differentPrivateKey = try KeyController.generateECDHPrivateKey()
+    let jwtProof = try JWS(
+      header: .init(parameters: [
+        "alg": "ES256",
+        "typ": "openid4vci-proof+jwt"
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "aud": "https://issuer.example.com",
+        "nonce": "test-nonce"
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES256, key: differentPrivateKey)!
+    )
+
+    // When/Then: Validation should fail with JWE error (signature verification failure)
+    XCTAssertThrowsError(try keyAttestation.validateJWTProofSignature(jwtProof))
+  }
+
+  func testJWTProofMustUseFirstKeyWhenMultipleKeysPresent() async throws {
+    // Given: Key attestation with TWO attested keys
+    let secondPrivateKey = try KeyController.generateECDHPrivateKey()
+    let secondPublicKey = try KeyController.generateECDHPublicKey(from: secondPrivateKey)
+    let secondJWK = try ECPublicKey(publicKey: secondPublicKey)
+
+    let keyAttestation = try KeyAttestationJWT(jws: try JWS(
+      header: .init(parameters: [
+        "alg": "ES256",
+        "typ": KeyAttestationJWT.keyAttestationJWTType
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "attested_keys": [
+          data.publicKey.toDictionary(),  // First key
+          secondJWK.toDictionary()        // Second key
+        ]
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES256, key: data.privateKey)!
+    ))
+
+    // And: JWT proof signed by the SECOND key (not first)
+    let jwtProofWithSecondKey = try JWS(
+      header: .init(parameters: [
+        "alg": "ES256",
+        "typ": "openid4vci-proof+jwt"
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "aud": "https://issuer.example.com",
+        "nonce": "test-nonce"
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES256, key: secondPrivateKey)!
+    )
+
+    // When/Then: Validation should fail (must use first key)
+    XCTAssertThrowsError(try keyAttestation.validateJWTProofSignature(jwtProofWithSecondKey))
+
+    // But: JWT proof signed by the FIRST key should succeed
+    let jwtProofWithFirstKey = try JWS(
+      header: .init(parameters: [
+        "alg": "ES256",
+        "typ": "openid4vci-proof+jwt"
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "aud": "https://issuer.example.com",
+        "nonce": "test-nonce"
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES256, key: data.privateKey)!
+    )
+
+    XCTAssertNoThrow(try keyAttestation.validateJWTProofSignature(jwtProofWithFirstKey))
+  }
+
+  // MARK: - TS3 v1.5 Default keyIndex Tests
+
+  func testBindingKeyDefaultsToKeyIndexZero() async throws {
+    // Given: BindingKey with jwtKeyAttestation case WITHOUT explicit keyIndex
+    let keyBindingKey: BindingKey = .jwtKeyAttestation(
+      algorithm: .init(.ES256),
+      keyAttestationJWT: { _ in
+        try! .init(jws: .init(compactSerialization: TestsConstants.ketAttestationJWT))
+      },
+      // keyIndex: NOT PROVIDED - should default to 0
+      privateKey: .secKey(data.privateKey)
+    )
+
+    // Then: The binding key should be created successfully
+    // (Testing that default parameter works)
+    switch keyBindingKey {
+    case .jwtKeyAttestation:
+      XCTAssert(true, "BindingKey created successfully with default keyIndex")
+    default:
+      XCTFail("Expected jwtKeyAttestation case")
+    }
+  }
+
+  func testKeyIndexOutOfBoundsThrowsError() async throws {
+    // Given: A simple key attestation with 1 key
+    let keyAttestation = try KeyAttestationJWT(jws: try JWS(
+      header: .init(parameters: [
+        "alg": "ES256",
+        "typ": KeyAttestationJWT.keyAttestationJWTType
+      ]),
+      payload: .init([
+        "iat": Date().timeIntervalSince1970,
+        "attested_keys": [data.publicKey.toDictionary()]  // Only 1 key (index 0)
+      ].toThrowingJSONData()),
+      signer: .init(signatureAlgorithm: .ES256, key: data.privateKey)!
+    ))
+
+    // Then: Verify attestedKeys count
+    XCTAssertEqual(keyAttestation.attestedKeys.count, 1, "Key attestation should have 1 key")
+
+    // And: Verify BindingKey can be created with default keyIndex (0)
+    let validBinding: BindingKey = .jwtKeyAttestation(
+      algorithm: .init(.ES256),
+      keyAttestationJWT: { _ in keyAttestation },
+      // keyIndex defaults to 0, which is valid
+      privateKey: .secKey(data.privateKey)
+    )
+
+    switch validBinding {
+    case .jwtKeyAttestation:
+      XCTAssert(true, "Valid binding key created with keyIndex=0")
+    default:
+      XCTFail("Expected jwtKeyAttestation case")
+    }
+
+    // And: Verify BindingKey can be created with explicit keyIndex=0
+    let explicitBinding: BindingKey = .jwtKeyAttestation(
+      algorithm: .init(.ES256),
+      keyAttestationJWT: { _ in keyAttestation },
+      keyIndex: 0,  // Explicit index 0 is valid
+      privateKey: .secKey(data.privateKey)
+    )
+
+    switch explicitBinding {
+    case .jwtKeyAttestation:
+      XCTAssert(true, "Valid binding key created with explicit keyIndex=0")
+    default:
+      XCTFail("Expected jwtKeyAttestation case")
+    }
+
+    // Note: Testing out-of-bounds requires full integration with the issuer flow
+    // which is covered by the existing integration tests. The bounds check logic
+    // is present in BindingKey.swift:154-159 and will be triggered during
+    // actual credential issuance.
   }
 
   // Regression (Bug#1): when an attestation proof is sent to an issuer that

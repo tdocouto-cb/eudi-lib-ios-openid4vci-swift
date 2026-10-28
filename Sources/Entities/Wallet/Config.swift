@@ -55,55 +55,115 @@ public typealias ClientSecret = String
 
 /// Configuration for OpenID4VCI.
 public struct OpenId4VCIConfig: Sendable {
-  
+
   /// The client used for OpenID4VCI operations.
   public let client: Client
-  
+
   /// The URI to which the authentication flow should redirect.
-  public let authFlowRedirectionURI: URL
-  
+  /// Required when `supportedGrants` is `.authorizationCode` or `.both`.
+  public let authFlowRedirectionURI: URL?
+
   /// Configuration specifying how issuance authorization should be handled.
   public let authorizeIssuanceConfig: AuthorizeIssuanceConfig
-  
+
   /// Whether to require PAR or not.
   public let requirePAR: ParUsage
-  
+
   /// An optional builder for client attestation proof-of-possession tokens.
   public let clientAttestationPoPBuilder: ClientAttestationPoPBuilder?
-  
+
   /// Policy defining how issuer metadata should be handled.
   public let issuerMetadataPolicy: IssuerMetadataPolicy
-  
+
   /// Client supported compression algorithms
   public let supportedCompressionAlgorithms: [CompressionAlgorithm]?
-  
+
   /// Dpop requirement, if required by wallet and not supported by issuer, halt the issuance process
   public let requireDpop: Bool
-  
+
+  /// When `true`, the wallet insists on presenting a client-attestation PoP JWT on every
+  /// authorization-server exchange that supports it.
+  public let requireClientAttestation: Bool
+
   /// Wallet's supported credential reuse policies
   public let supportedCredentialReusePolicies: SupportedCredentialReusePolicies
-  
+
+  /// Policy defining which signing algorithms and attested proof types the
+  /// wallet supports. Plain `jwt` proofs (no key attestation) are not supported.
+  ///
+  /// Default is `.haipCompliant()`.
+  public let proofTypesPolicy: ProofTypesPolicy
+
+  /// Optional policy that, when set, activates WRP Registration Certificate (WRPRC)
+  /// enforcement during `Issuer.make(...)`. When `nil`, WRPRC is not validated.
+  public let registrationCertificatePolicy: RegistrationCertificatePolicy?
+
+  /// The grant types supported by the wallet.
+  /// Default is `.both`.
+  public let supportedGrants: SupportedGrants
+
+  /// Wallet-side configuration of credential request / response encryption: whether encrypted
+  /// responses are required, which key families (EC / RSA), curve, key size, algorithms and
+  /// content encryption methods the wallet is willing to use.
+  ///
+  /// Default is `.default` (encryption supported but not required, EC P-256 and RSA 2048).
+  public let encryptionSupportConfig: EncryptionSupportConfig
+
   /// Initializes an `OpenId4VCIConfig` instance with the given parameters.
   /// - Parameters:
   ///   - client: The client used for OpenID4VCI operations.
-  ///   - authFlowRedirectionURI: The URI to which the authentication flow should redirect.
+  ///   - authFlowRedirectionURI: The URI to which the authentication flow should redirect. Required when `supportedGrants` is `.authorizationCode` or `.both`.
   ///   - authorizeIssuanceConfig: Specifies how issuance authorization should be handled (default: `.favorScopes`).
   ///   - requirePAR: Whether to require Pushed Authorization Requests (default: `true`).
   ///   - clientAttestationPoPBuilder: An optional client attestation PoP builder (default: `nil`).
   ///   - issuerMetadataPolicy: Policy defining how issuer metadata should be handled (default: `.ignoreSigned`).
   ///   - requireDpop: If dpop is supported then use it, otherwise always don't
+  ///   - proofTypesPolicy: Policy defining which proof types the wallet supports (default: `.haipCompliant()`).
   ///   - supportedCredentialReusePolicies: Wallet's supported credential reuse policies (default: `.notSupported`).
+  ///   - registrationCertificatePolicy: Optional policy that, when set, activates WRPRC enforcement in `Issuer.make(...)` (default: `nil`).
+  ///   - supportedGrants: The grant types supported by the wallet (default: `.both`).
+  ///   - encryptionSupportConfig: Wallet-side request / response encryption configuration (default: `.default`).
+  /// - Throws: `ValidationError` if configuration is invalid.
   public init(
     client: Client,
-    authFlowRedirectionURI: URL,
+    authFlowRedirectionURI: URL? = nil,
     authorizeIssuanceConfig: AuthorizeIssuanceConfig = .favorScopes,
     requirePAR: ParUsage = .required(authorizationCodeDPoPBinding: true),
     clientAttestationPoPBuilder: ClientAttestationPoPBuilder? = nil,
     issuerMetadataPolicy: IssuerMetadataPolicy = .ignoreSigned,
     supportedCompressionAlgorithms: [CompressionAlgorithm]? = nil,
+    proofTypesPolicy: ProofTypesPolicy = .haipCompliant(),
     requireDpop: Bool = true,
-    supportedCredentialReusePolicies: SupportedCredentialReusePolicies = .notSupported
+    requireClientAttestation: Bool = false,
+    supportedCredentialReusePolicies: SupportedCredentialReusePolicies = .notSupported,
+    registrationCertificatePolicy: RegistrationCertificatePolicy? = nil,
+    supportedGrants: SupportedGrants = .both,
+    encryptionSupportConfig: EncryptionSupportConfig = .default
   ) {
+    // Validate: authFlowRedirectionURI must be provided when supportedGrants is .authorizationCode or .both
+    if supportedGrants.requiresAuthorizationCodeFlow && authFlowRedirectionURI == nil {
+      preconditionFailure(
+        "authFlowRedirectionURI must be provided when supportedGrants is .authorizationCode or .both"
+      )
+    }
+
+    // When a WRPRC policy is configured, the issuer metadata must be signed —
+    // otherwise there is no cryptographic binding of the `issuer_info` (and
+    // therefore the WRPRC) to the issuer's identity, and no WRP Access
+    // Certificate to hand to the policy validator.
+    if registrationCertificatePolicy != nil {
+      switch issuerMetadataPolicy {
+      case .requireSigned:
+        break
+      case .preferSigned, .ignoreSigned:
+        preconditionFailure(
+          "OpenId4VCIConfig: registrationCertificatePolicy requires " +
+          "issuerMetadataPolicy = .requireSigned(...). " +
+          "Received: \(issuerMetadataPolicy)"
+        )
+      }
+    }
+
     self.client = client
     self.authFlowRedirectionURI = authFlowRedirectionURI
     self.authorizeIssuanceConfig = authorizeIssuanceConfig
@@ -112,6 +172,11 @@ public struct OpenId4VCIConfig: Sendable {
     self.issuerMetadataPolicy = issuerMetadataPolicy
     self.supportedCompressionAlgorithms = supportedCompressionAlgorithms
     self.requireDpop = requireDpop
+    self.requireClientAttestation = requireClientAttestation
     self.supportedCredentialReusePolicies = supportedCredentialReusePolicies
+    self.proofTypesPolicy = proofTypesPolicy
+    self.registrationCertificatePolicy = registrationCertificatePolicy
+    self.supportedGrants = supportedGrants
+    self.encryptionSupportConfig = encryptionSupportConfig
   }
 }

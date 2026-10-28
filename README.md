@@ -53,6 +53,7 @@ In particular, the library focuses on the wallet's role in the protocol to:
 | `key_attestation` to the JWT Proof (JOSE header)                                                | ✅                                                                                                                  |
 | Wallet attestation                                                                              | ✅                                                                                                                  |
 | Credential Reuse Policy (ETSI TS 119 472-3 / ARF Annex II)                                      | ✅                                                                                                                  |
+| Proof Types Policy                                   | ✅                                                                                                                  |
 
 
 ## Disclaimer
@@ -144,10 +145,15 @@ The OpenID4VCI specification defines two flows of issuance:
 
 The ```Issuer``` is the component that facilitates the authorization and submission of a credential issuance request.
 It consists of two components:
-- **IssuanceAuthorizer**: A component responsible for all interactions with an authorization server to authorize a request for credential issuance.
+- **AuthorizeIssuance**: A component responsible for all interactions with an authorization server to authorize a request for credential issuance.
 - **IssuanceRequester**: A component responsible for all interactions with a credential issuer for submitting credential issuance requests.
 
 #### Initialize an Issuer
+
+Two construction paths are supported:
+
+**Direct initialisation** — for wallets that do not enable WRP Registration
+Certificate (WRPRC) enforcement:
 
 ```swift
 import OpenID4VCI
@@ -163,6 +169,70 @@ let issuer = try Issuer(
     config: config
 )
 ```
+
+**`Issuer.make(...)` factory** — required when
+`config.registrationCertificatePolicy` is set. Runs WRPRC policy enforcement
+against the resolved offer and returns an `IssuerResolutionResult` pairing
+the constructed `Issuer` with any warnings produced by the policy:
+
+```swift
+import OpenID4VCI
+
+let result = try await Issuer.make(
+    credentialOffer: offer,
+    config: config,
+    session: session
+)
+let issuer = result.issuer
+let warnings = result.warnings  // [String: [PolicyViolation]]
+```
+
+The library treats the WRPRC as an opaque `String` and delegates every trust
+and signature decision to the caller-supplied policy. Library responsibilities
+are limited to:
+
+1. Enforcing WRPRC presence — exactly one `registration_cert`-format entry in
+   `issuer_info` when a policy is configured (per CIR 2024/2082).
+2. Ensuring the WRPAC is available on the resolved metadata.
+3. Applying the caller's policy and acting on its result.
+
+The policy receives:
+
+- **WRPAC** — the WRP Access Certificate (base64 DER, single X.509 leaf) that
+  signed the issuer metadata.
+- **WRPRC** — the raw registration certificate value as delivered in
+  `issuer_info` (a `String`, typically a JWT). Parse it yourself if you need
+  to inspect the leaf/chain and perform your own trust checks.
+- **offeredConfigurations** — the credential configurations referenced by the
+  resolved `CredentialOffer`.
+
+...and returns an `Authorization`:
+
+- `.granted(warnings: [String: [PolicyViolation]] = [:])` — resolution succeeds.
+  Warnings are keyed by a caller-defined bucket; convention is to key by
+  `CredentialConfigurationIdentifier.value` so a wallet UI can render warnings
+  next to each credential option, and use `"global"` for request-wide warnings.
+- `.notGranted(error: PolicyViolation)` — resolution fails with
+  `WRPRCError.policyNotMet(error)`.
+
+```swift
+let policy = RegistrationCertificatePolicy { wrpac, wrprc, offered in
+    // Parse/verify the raw WRPRC yourself if your policy needs it.
+    if /* reject */ {
+        return .notGranted(error: PolicyViolation("reason for rejection"))
+    }
+    var warnings: [String: [PolicyViolation]] = [:]
+    for id in offered.keys {
+        // ...evaluate per credential; append to warnings[id.value]...
+    }
+    return .granted(warnings: warnings)
+}
+```
+
+Setting `registrationCertificatePolicy` while `issuerMetadataPolicy` is
+`.preferSigned` or `.ignoreSigned` trips a `preconditionFailure` at
+`OpenId4VCIConfig` construction — WRPRC enforcement requires a
+cryptographically bound issuer metadata signer to supply the WRPAC.
 
 #### Authorize request via Authorization Code Flow
 
@@ -231,12 +301,9 @@ let payload: IssuanceRequestPayload = .configurationBased(
 )
 
 let requestOutcome = try await issuer.requestCredential(
-    proofRequest: ...,
+    request: ...,
     bindingKeys: ..., // SigningKeyProxy array
-    requestPayload: payload,
-    responseEncryptionSpecProvider:  { 
-        Issuer.createResponseEncryptionSpec($0) 
-    }
+    requestPayload: payload
 )
 
 switch requestOutcome {
@@ -257,6 +324,27 @@ switch requestOutcome {
 
 You can also check the unit test target for more usage examples.
 
+### Refresh Access Token
+
+A Wallet/Caller can refresh the `AccessToken` of an `AuthorizedRequest` using a `refresh_token` grant.
+
+Prerequisites:
+1. Authorization Server supports `refresh_token` grant
+2. `AuthorizedRequest` contains a `RefreshToken`
+
+Library will perform a `refresh_token` grant, and return the updated `AuthorizedRequest`:
+
+```swift
+import OpenID4VCI
+
+let authorizedRequest: AuthorizedRequest = ... // has been retrieved in a previous step
+let issuer: Issuer = ...
+
+let updatedAuthorizedRequest = try await issuer.refresh(
+    authorizedRequest: authorizedRequest
+)
+```
+
 ## Configuration options
 
 ```swift
@@ -264,10 +352,17 @@ public struct OpenId4VCIConfig: Sendable {
   public let client: Client
   public let authFlowRedirectionURI: URL
   public let authorizeIssuanceConfig: AuthorizeIssuanceConfig
-  public let requirePAR: Bool
-  public let dPoPConstructor: DPoPConstructorType?
+  public let requirePAR: ParUsage
   public let clientAttestationPoPBuilder: ClientAttestationPoPBuilder?
   public let issuerMetadataPolicy: IssuerMetadataPolicy
+  public let supportedCompressionAlgorithms: [CompressionAlgorithm]?
+  public let requireDpop: Bool
+  public let requireClientAttestation: Bool
+  public let supportedCredentialReusePolicies: SupportedCredentialReusePolicies
+  public let proofTypesPolicy: ProofTypesPolicy
+  public let registrationCertificatePolicy: RegistrationCertificatePolicy?
+  public let supportedGrants: SupportedGrants
+  public let encryptionSupportConfig: EncryptionSupportConfig
 }
 ```
 
@@ -277,10 +372,174 @@ public struct OpenId4VCIConfig: Sendable {
 
 - `authFlowRedirectionURI`: It is the `redirect_uri` parameter that will be included in a PAR or simple authorization request.
 - `authorizeIssuanceConfig`: An enum that allows you to favour scopes or authorization details, favour scopes is the default.
-- `requirePAR`: Force the usage of PAR if the authorization server supports it. Fail if true and not supported by server
-- `dPoPConstructor`: If dpop is supported this option constructs what is required.
+- `requirePAR`: A `ParUsage` enum that controls whether Pushed Authorization Requests are required (`.required(authorizationCodeDPoPBinding:)`) or never used (`.never`).
 - `clientAttestationPoPBuilder`: If the authorization supports client attestations, this object constructs what is required.
-- `issuerMetadataPolicy`: Trust between the Wallet and the Signer of the signed metadata advertised by the Credential Issuer is established using this configuration option.
+- `issuerMetadataPolicy`: Trust between the Wallet and the Signer of the signed metadata advertised by the Credential Issuer is established using this configuration option. `.requireSigned` and `.preferSigned` both take an `IssuerTrust.byCertificateChain(certificateChainTrust:)` (JWK-based pinning was removed in favour of chain-of-trust rooted in the EU List of Trusted Lists).
+- `supportedCompressionAlgorithms`: Optional list of `CompressionAlgorithm`s the wallet advertises support for when negotiating signed metadata / request compression. `nil` means the wallet does not advertise compression support.
+- `requireDpop`: If `true`, the wallet requires the authorization server to support DPoP. If DPoP is not supported by the server the issuance flow is halted.
+- `requireClientAttestation`: If `true`, the wallet insists on presenting a client-attestation PoP JWT on every authorization-server exchange that supports it. When set, any misconfiguration throws `ValidationError.clientAttestationRequired`. Defaults to `false`(backward-compatible).
+- `supportedCredentialReusePolicies`: The set of credential reuse policies the wallet is willing to honour. Defaults to `.notSupported`.
+- `proofTypesPolicy`: Policy defining which proof types the wallet supports. See [Proof Types Policy Configuration](#proof-types-policy-configuration) for details.
+- `registrationCertificatePolicy`: Optional. When set, activates WRP Registration Certificate (WRPRC) enforcement in `Issuer.make(...)`. Carries an `Authorize` closure that receives the WRPAC (`String`), the raw opaque WRPRC value (`String`) as delivered in `issuer_info`, and the offered credential configurations, and returns an `Authorization` — either `.granted(warnings: [String: [PolicyViolation]])` or `.notGranted(error: PolicyViolation)`. The library performs no chain-of-trust or signature validation on the WRPRC — those decisions live in the caller's closure. Requires `issuerMetadataPolicy = .requireSigned(...)` (checked at construction). Defaults to `nil` (no WRPRC enforcement).
+
+- `supportedGrants`: The grant types supported by the wallet. Defaults to `.both`.
+- `encryptionSupportConfig`: Wallet-side configuration of credential request / response encryption: whether encrypted responses are required, which key families (EC / RSA), curve, key size, algorithms and content encryption methods the wallet is willing to use. See [Credential response encryption configuration](#credential-response-encryption-configuration). Defaults to `.default`.
+
+The DPoP constructor itself is passed as a parameter to `Issuer(...)` / `Issuer.make(...)`, not stored on `OpenId4VCIConfig`.
+
+### Credential response encryption configuration
+
+The issuer advertises in its metadata (`credential_response_encryption`, `credential_request_encryption`)
+which JWE algorithms and content encryption methods it supports, and whether encryption is required.
+`EncryptionSupportConfig` describes what the **wallet** is willing to use; the library negotiates the
+intersection, preserving the issuer's preference order.
+
+```swift
+public struct EncryptionSupportConfig: Sendable {
+  public let credentialResponseEncryptionPolicy: CredentialResponseEncryptionPolicy // .required | .supported
+  public let ecConfig: EcConfig?        // nil disables the ECDH-ES family
+  public let rsaConfig: RsaConfig?      // nil disables the RSA family
+  public let supportedEncryptionMethods: [JOSEEncryptionMethod]
+}
+
+public struct EcConfig: Sendable {
+  public let ecKeyCurve: ECCurveType                    // JOSESwift: .P256 (default), .P384, .P521
+  public let supportedJWEAlgorithms: [JWEAlgorithm]   // subset of ECDH-ES, ECDH-ES+A128KW, ECDH-ES+A192KW, ECDH-ES+A256KW
+}
+
+public struct RsaConfig: Sendable {
+  public let rcaKeySize: Int                    // >= 2048, default 2048
+  public let supportedJWEAlgorithms: [JWEAlgorithm]   // subset of RSA1_5, RSA-OAEP, RSA-OAEP-256, RSA-OAEP-384, RSA-OAEP-512
+}
+```
+
+- `credentialResponseEncryptionPolicy`:
+  - `.supported` (default): encrypted responses are used whenever the issuer supports them; plaintext responses are accepted when the issuer does not require encryption.
+  - `.required`: issuance fails with `CredentialIssuanceError.responseEncryptionRequiredByWalletButNotSupportedByIssuer` when the issuer does not support response encryption, and with `CredentialIssuanceError.responseEncryptionRequiredByWalletButSpecMissing` when no mutually supported algorithm / method exists.
+- `ecConfig` / `rsaConfig`: key families the wallet is willing to generate key material for, each with an optional algorithm allow-list. `nil` disables the family.
+- `supportedEncryptionMethods`: content encryption methods for both request and response encryption. Defaults to every platform supported method (`A128GCM`, `A192GCM`, `A256GCM`, `A128CBC-HS256`, `A192CBC-HS384`, `A256CBC-HS512`).
+
+```swift
+// Require encrypted responses, ECDH-ES only (RSA disabled), AES-GCM only
+let config = OpenId4VCIConfig(
+  client: client,
+  authFlowRedirectionURI: redirectURI,
+  encryptionSupportConfig: EncryptionSupportConfig(
+    credentialResponseEncryptionPolicy: .required,
+    ecConfig: EcConfig(ecKeyCurve: .P256),
+    rsaConfig: nil,
+    supportedEncryptionMethods: [.init(.A128GCM), .init(.A256GCM)]
+  )
+)
+```
+
+The negotiated spec is available through `issuer.responseEncryptionSpec(privateKeyData:)`, which is also
+what `requestCredential(request:bindingKeys:requestPayload:)` uses. Pass the exported private key as
+`privateKeyData` to rebuild the same spec for a deferred credential request. The static
+`Issuer.createResponseEncryptionSpec(_:walletConfig:privateKeyData:)` performs the same negotiation for a
+given configuration. The legacy `Issuer.createResponseEncryptionSpec(_:privateKeyData:)` and
+`Issuer.createResponseEncryptionSpecFrom(...)` keep working and use `EncryptionSupportConfig.default`.
+
+### Proof Types Policy Configuration
+
+The library supports configurable proof type policies. By default, it enforces
+device-bound attestations (HAIP-compliant), but can be configured to accept
+plain JWT proofs for testing or legacy compatibility.
+
+#### Policy Options
+
+**1. Strict (HAIP-Compliant) - Default**
+
+Enforces device-bound attestations. Only accepts:
+- `proof_type: attestation`
+- `proof_type: jwt` with `key_attestation` in the protected header
+
+Rejects issuers that don't advertise `key_attestations_required`.
+
+```swift
+// Default - recommended for production
+let config = OpenId4VCIConfig(
+  client: client,
+  authFlowRedirectionURI: redirectURI,
+  proofTypesPolicy: .haipCompliant()  // This is the default
+)
+```
+
+**2. Accept All (Legacy/Testing)**
+
+Accepts any proof type including plain JWT without key attestation.
+Use for testing or compatibility with non-HAIP issuers.
+
+```swift
+let config = OpenId4VCIConfig(
+  client: client,
+  authFlowRedirectionURI: redirectURI,
+  proofTypesPolicy: .acceptAll(supportedAlgorithms: [JWSAlgorithm(.ES256)])
+)
+```
+
+**3. Flexible (Custom Configuration)**
+
+Fine-grained control over which proof types are accepted.
+
+```swift
+let config = OpenId4VCIConfig(
+  client: client,
+  authFlowRedirectionURI: redirectURI,
+  proofTypesPolicy: .flexible(FlexibleProofPolicy(
+    supportedAlgorithms: [JWSAlgorithm(.ES256)],
+    supportedAttestedProofTypes: [.jwtWithKeyAttestation, .attestation],
+    allowPlainJwtProof: true  // Also accept plain JWT
+  ))
+)
+```
+
+#### Policy Types
+
+```swift
+public enum ProofTypesPolicy: Sendable {
+  case strict(StrictProofPolicy)
+  case acceptAll(supportedAlgorithms: [JWSAlgorithm])
+  case flexible(FlexibleProofPolicy)
+
+  // Convenience for HAIP-compliant strict policy
+  public static func haipCompliant(
+    algorithms: [JWSAlgorithm] = [JWSAlgorithm(.ES256)]
+  ) -> ProofTypesPolicy
+}
+
+public enum AttestedProofType: String, Sendable {
+  case jwtWithKeyAttestation
+  case attestation
+}
+```
+
+#### Binding Keys
+
+When using plain JWT proofs, use `BindingKey.jwt`:
+
+```swift
+let bindingKey: BindingKey = .jwt(
+  algorithm: JWSAlgorithm(.ES256),
+  jwk: publicKeyJWK,
+  privateKey: .secKey(privateKey)
+)
+```
+
+For attested proofs (default), use `BindingKey.jwtKeyAttestation` or `BindingKey.attestation`.
+
+#### Validation Behavior
+
+| Policy | Issuer Requires Attestation | Issuer Allows Plain JWT | BindingKey.jwt | BindingKey.jwtKeyAttestation |
+|--------|----------------------------|------------------------|----------------|------------------------------|
+| `.strict` | Pass | Reject | Reject | Pass |
+| `.acceptAll` | Pass | Pass | Pass (if issuer allows) | Pass |
+| `.flexible(allowPlainJwt: true)` | Pass | Pass | Pass (if issuer allows) | Pass |
+| `.flexible(allowPlainJwt: false)` | Pass | Reject | Reject | Pass |
+
+If the issuer requires key attestation but the wallet provides `BindingKey.jwt`,
+the request will fail with `CredentialIssuanceError.proofTypeKeyAttestationRequired`.
+
 
 ## Features supported
 
@@ -301,7 +560,14 @@ endpoints.
 OpenId4VCI specification defines several extension points to accommodate the differences across Credential formats. The current version of the library fully supports **ISO mDL** profile and gives some initial support for **IETF SD-JWT VC** profile.  
 
 #### Proof Types
-OpenId4VCI specification (draft 14) defines proofs that can be included in a credential issuance request, JWT proof type in particular. The current version of the library supports JWT proof types.
+OpenId4VCI specification (draft 14) defines proofs that can be included in a credential issuance request. The library supports:
+
+- `attestation` proof
+- `jwt` proof with `key_attestation` in the protected header (HAIP-compliant)
+- `jwt` proof without key attestation (plain JWT, opt-in via policy)
+
+By default, only attested proof types are accepted (HAIP-compliant). Plain JWT proofs
+can be enabled via `.acceptAll` or `.flexible` policies. See [Proof Types Policy Configuration](#proof-types-policy-configuration) above.
 
 ### Demonstrating Proof of Possession (DPoP)
 
@@ -325,9 +591,23 @@ interactions use the newly provided DPoP Nonce value.
 
 ### OAUTH2 Attestation-Based Client Authentication
 
-Library supports [OAUTH2 Attestation-Based Client Authentication - Draft 03](https://www.ietf.org/archive/id/draft-ietf-oauth-attestation-based-client-auth-03.html)
+Library supports [OAUTH2 Attestation-Based Client Authentication - Draft 03](https://www.ietf.org/archive/id/draft-ietf-oauth-attestation-based-client-auth-03.html).
 
-An example can be found in this test: `testNoOfferSdJWTClientAuthentication()`
+When a `Client.attested(...)` is used, the provided `ClientAttestationJWT` is treated as a **passthrough** for the compact-serialized JWT returned by the wallet's `ClientAttestationProvider`. The library does not parse or validate its header, signature, or claims — it simply forwards `attestation.value` as the `OAuth-Client-Attestation` HTTP header.
+
+```swift
+let attestation = ClientAttestationJWT(compactJwtStringFromProvider)
+```
+
+Callers that want to enforce a schema can opt in explicitly:
+
+```swift
+// TS3 v1.5 §2.3 Wallet Instance Attestation shape
+let claims = try attestation.decodeAsClientAttestationClaims()
+let clientId = claims.subject.value
+let jwk = claims.confirmation.jwk
+```
+
 
 ### Credential Reuse Policy
 
@@ -435,10 +715,6 @@ can be requested using `authorization_details` (`identifierBased`) or `scope`(`c
 Though for `authorization_details` we don't support the `format` attribute and its specializations per format.
 Only `credential_configuration_id` attribute is supported.
 
-### Key attestations
-
-Current version of the library does not support [key attestations](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-15.html#appendix-D) 
-neither as a [proof type](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0-15.html#section-8.2.1.3) nor as a `key_attestation` header in JWT proofs.
 
 ## How to contribute
 

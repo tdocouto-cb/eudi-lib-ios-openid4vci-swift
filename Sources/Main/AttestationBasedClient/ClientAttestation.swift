@@ -17,55 +17,48 @@ import Foundation
 @preconcurrency import JOSESwift
 @preconcurrency import SwiftyJSON
 
-public struct ClientAttestationJWT: Sendable {
-  public let jws: JWS
-  private let payload: JSON
-  
-  public init(jws: JWS, validateCnf: Bool = true) throws {
-    self.jws = jws
-    
-    guard jws.header.algorithm != nil else {
-      throw ClientAttestationError.notSigned
-    }
-    
-    let payloadData = jws.payload.data()
-    guard let jsonObject = try JSONSerialization.jsonObject(
-      with: payloadData,
-      options: []
-    ) as? [String: Any] else {
-      throw ClientAttestationError.invalidPayload
-    }
-    self.payload = JSON(jsonObject)
-    
-    if validateCnf {
-      guard let cnf = payload[JWTClaimNames.cnf].dictionary else {
-        throw ClientAttestationError.missingCnfClaim
-      }
-      
-      guard cnf[JWTClaimNames.JWK] != nil else {
-        throw ClientAttestationError.missingJwkClaim
-      }
-    }
-    
-    guard payload[JWTClaimNames.expirationTime].number != nil else {
-      throw ClientAttestationError.missingExpirationClaim
-    }
+/// A `ClientAttestationJWT` is the Wallet Instance Attestation (WIA) sent by the wallet
+/// to the authorization server when using attestation-based client authentication.
+///
+public struct ClientAttestationJWT: Sendable, Equatable, Hashable {
+
+  public let value: String
+
+  public init(_ value: String) {
+    self.value = value
   }
-  
-  public var clientId: ClientId {
-    return payload[JWTClaimNames.subject].string ?? ""
+
+  /// Convenience initializer accepting an already-parsed `JWS`.
+  public init(jws: JWS) {
+    self.value = jws.compactSerializedString
   }
-  
-  public var cnf: JSON {
-    return JSON(payload[JWTClaimNames.cnf])
+}
+
+public extension ClientAttestationJWT {
+
+  /// Decodes the JWT payload into the supplied claims type.
+  ///
+  /// Use this to opt in to a specific claims schema — for example
+  /// `decodeClaimsSet(ClientAttestationJWTClaims.self)` to enforce the TS3 WIA shape.
+  func decodeClaimsSet<T: Decodable>(_ type: T.Type) throws -> T {
+    let payload = try decodePayloadData()
+    return try JSONDecoder().decode(T.self, from: payload)
   }
-  
-  public var pubKey: JWK? {
-    if let rsa = try? RSAPublicKey(data: cnf[JWTClaimNames.JWK].rawData()) {
-      return rsa
-    } else if let ec = try? ECPublicKey(data: cnf[JWTClaimNames.JWK].rawData()) {
-      return ec
-    }
-    return nil
+
+  /// Decodes the JWT payload as a generic JSON structure.
+  func decodeClaimsSet() throws -> JSON {
+    let payload = try decodePayloadData()
+    let jsonObject = try JSONSerialization.jsonObject(with: payload, options: [])
+    return JSON(jsonObject)
+  }
+
+  /// Decodes the JWT payload into `ClientAttestationJWTClaims`, enforcing the TS3 WIA schema.
+  func decodeAsClientAttestationClaims() throws -> ClientAttestationJWTClaims {
+    try ClientAttestationJWTClaims.parse(payload: try decodeClaimsSet())
+  }
+
+  private func decodePayloadData() throws -> Data {
+    let jws = try JWS(compactSerialization: value)
+    return jws.payload.data()
   }
 }

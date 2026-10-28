@@ -71,21 +71,7 @@ public actor CredentialIssuerMetadataResolver: CredentialIssuerMetadataType {
         policy: policy,
         issuerId: issuerId
       )
-      
-      // Validate on success
-      if case .success(let metadata) = result {
-        
-        guard
-          let requestHost = wellKnownURL.host,
-          let issuerHost = metadata.credentialIssuerIdentifier.url.host,
-          requestHost.caseInsensitiveCompare(issuerHost) == .orderedSame
-        else {
-          throw ValidationError.error(
-            reason: "Issuer domain does not match metadata issuer"
-          )
-        }
-      }
-      
+
       return result
     }
   }

@@ -22,7 +22,7 @@ import JOSESwift
 class IssuanceAuthorizationTest: XCTestCase {
   
   let config: OpenId4VCIConfig = .init(
-    client: .public(id: WALLET_DEV_CLIENT_ID),
+    client: attestionClient,
     authFlowRedirectionURI: URL(string: "urn:ietf:wg:oauth:2.0:oob")!,
     authorizeIssuanceConfig: .favorScopes
   )
@@ -276,7 +276,7 @@ class IssuanceAuthorizationTest: XCTestCase {
         preAuthorizationCode: code.preAuthorizedCode,
         txCode: code.txCode
       ),
-      client: .public(id: "218232426"),
+      client: attestionClient,
       transactionCode: "123456"
     )
     
@@ -343,7 +343,7 @@ class IssuanceAuthorizationTest: XCTestCase {
     let publicKey = try KeyController.generateRSAPublicKey(from: privateKey)
     
     let alg = JWSAlgorithm(.RS256)
-    let publicKeyJWK = try RSAPublicKey(
+    let _ = try RSAPublicKey(
       publicKey: publicKey,
       additionalParameters: [
         "alg": alg.name,
@@ -351,9 +351,11 @@ class IssuanceAuthorizationTest: XCTestCase {
         "kid": UUID().uuidString
       ])
     
-    let bindingKey: BindingKey = .jwt(
+    let bindingKey: BindingKey = .jwtKeyAttestation(
       algorithm: alg,
-      jwk: publicKeyJWK,
+      keyAttestationJWT: { _ in
+        try .init(jws: .init(compactSerialization: TestsConstants.ketAttestationJWT))
+      },
       privateKey: .secKey(privateKey),
       issuer: "218232426"
     )
@@ -371,7 +373,7 @@ class IssuanceAuthorizationTest: XCTestCase {
         preAuthorizationCode: code.preAuthorizedCode,
         txCode: code.txCode
       ),
-      client: .public(id: "218232426"),
+      client: attestionClient,
       transactionCode: "12345"
     )
     
@@ -423,7 +425,7 @@ class IssuanceAuthorizationTest: XCTestCase {
     let privateKeyProxy: SigningKeyProxy = .secKey(privateKey)
     
     let alg = JWSAlgorithm(.RS256)
-    let publicKeyJWK = try RSAPublicKey(
+    let _ = try RSAPublicKey(
       publicKey: publicKey,
       additionalParameters: [
         "alg": alg.name,
@@ -431,9 +433,11 @@ class IssuanceAuthorizationTest: XCTestCase {
         "kid": UUID().uuidString
       ])
     
-    let bindingKey: BindingKey = .jwt(
+    let bindingKey: BindingKey = .jwtKeyAttestation(
       algorithm: alg,
-      jwk: publicKeyJWK,
+      keyAttestationJWT: { _ in
+        try .init(jws: .init(compactSerialization: TestsConstants.ketAttestationJWT))
+      },
       privateKey: privateKeyProxy,
       issuer: "track2_full"
     )
@@ -448,10 +452,7 @@ class IssuanceAuthorizationTest: XCTestCase {
       )
     
     let attestationConfig: OpenId4VCIConfig = .init(
-      client: try! selfSignedClient(
-        clientId: "track2_full",
-        privateKey: try KeyController.generateECDHPrivateKey()
-      ),
+      client: attestionClient,
       authFlowRedirectionURI: URL(string: "urn:ietf:wg:oauth:2.0:oob")!,
       authorizeIssuanceConfig: .favorScopes,
       clientAttestationPoPBuilder: DefaultClientAttestationPoPBuilder()
@@ -565,7 +566,7 @@ class IssuanceAuthorizationTest: XCTestCase {
     let publicKey = try KeyController.generateECDHPublicKey(from: privateKey)
 
     let alg = JWSAlgorithm(.ES256)
-    let publicKeyJWK = try ECPublicKey(
+    let _ = try ECPublicKey(
       publicKey: publicKey,
       additionalParameters: [
         "alg": alg.name,
@@ -573,9 +574,11 @@ class IssuanceAuthorizationTest: XCTestCase {
         "kid": UUID().uuidString
     ])
 
-    let bindingKey: BindingKey = .jwt(
+    let bindingKey: BindingKey = .jwtKeyAttestation(
       algorithm: alg,
-      jwk: publicKeyJWK,
+      keyAttestationJWT: { _ in
+        try .init(jws: .init(compactSerialization: TestsConstants.ketAttestationJWT))
+      },
       privateKey: .secKey(privateKey),
       issuer: "218232426"
     )
@@ -594,7 +597,7 @@ class IssuanceAuthorizationTest: XCTestCase {
         preAuthorizationCode: code.preAuthorizedCode,
         txCode: code.txCode
       ),
-      client: .public(id: WALLET_DEV_CLIENT_ID),
+      client: attestionClient,
       transactionCode: "12345"
     )
 
@@ -653,7 +656,7 @@ class IssuanceAuthorizationTest: XCTestCase {
     let publicKey = try KeyController.generateECDHPublicKey(from: privateKey)
     
     let alg = JWSAlgorithm(.ES256)
-    let jwk = try ECPublicKey(
+    let _ = try ECPublicKey(
       publicKey: publicKey,
       additionalParameters: [
         "alg": alg.name,
@@ -683,9 +686,11 @@ class IssuanceAuthorizationTest: XCTestCase {
       XCTAssert(false, "Unexpected grant type")
     }
     
-    let bindingKey: BindingKey = .jwt(
+    let bindingKey: BindingKey = .jwtKeyAttestation(
       algorithm: alg,
-      jwk: jwk,
+      keyAttestationJWT: { _ in
+        try .init(jws: .init(compactSerialization: TestsConstants.ketAttestationJWT))
+      },
       privateKey: .secKey(privateKey),
       issuer: "218232426"
     )
@@ -703,7 +708,7 @@ class IssuanceAuthorizationTest: XCTestCase {
         preAuthorizationCode: code.preAuthorizedCode,
         txCode: code.txCode
       ),
-      client: .public(id: "218232426"),
+      client: attestionClient,
       transactionCode: "12345"
     )
     

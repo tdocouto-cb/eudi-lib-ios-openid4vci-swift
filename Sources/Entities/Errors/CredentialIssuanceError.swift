@@ -29,6 +29,11 @@ public enum CredentialIssuanceError: Error, LocalizedError {
   case responseEncryptionAlgorithmNotSupportedByIssuer
   case responseEncryptionMethodNotSupportedByIssuer
   case responseCompressionMethodNotSupportedByIssuer
+  case responseEncryptionRequiresRequestEncryption
+  case responseEncryptionRequiredByIssuerButSpecMissing
+  case responseEncryptionRequiredByIssuerButPlaintextReceived
+  case responseEncryptionRequiredByWalletButNotSupportedByIssuer
+  case responseEncryptionRequiredByWalletButSpecMissing
   
   case requestEncryptionNotSupportedByIssuer
   case requestEncryptionAlgorithmNotSupportedByIssuer
@@ -48,6 +53,15 @@ public enum CredentialIssuanceError: Error, LocalizedError {
   case proofTypeKeyAttestationRequired
   case combinationOfBindingKeys
   
+  case proofTypesNotSupportedByCredentialConfiguration
+  case proofTypeNotSupportedByWalletPolicy
+  case issuerMetadataNoAttestedProofType
+  case bindingKeyNotAttestationCapable
+  case noMatchingAlgorithmForProofType
+  case keyIndexOutOfBounds(index: UInt, available: Int)
+  case missingKid
+  case invalidKid(expected: String, actual: String)
+
   public var errorDescription: String? {
     switch self {
     case .pushedAuthorizationRequestFailed(_, let errorDescription),
@@ -76,6 +90,16 @@ public enum CredentialIssuanceError: Error, LocalizedError {
       return "Response encryption method not supported by issuer."
     case .responseCompressionMethodNotSupportedByIssuer:
       return "Response compression method not supported by issuer."
+    case .responseEncryptionRequiresRequestEncryption:
+      return "Response encryption requires request encryption to be configured."
+    case .responseEncryptionRequiredByIssuerButSpecMissing:
+      return "Issuer requires response encryption but the wallet could not build a response encryption spec."
+    case .responseEncryptionRequiredByIssuerButPlaintextReceived:
+      return "Issuer advertises credential_response_encryption as required but returned a plaintext response."
+    case .responseEncryptionRequiredByWalletButNotSupportedByIssuer:
+      return "Wallet requires credential response encryption but the issuer does not support it."
+    case .responseEncryptionRequiredByWalletButSpecMissing:
+      return "Wallet requires credential response encryption but no response encryption spec could be built from the issuer's and the wallet's supported algorithms and methods."
     
     case .requestEncryptionNotSupportedByIssuer:
       return "Encrypted request not supported by issuer."
@@ -110,6 +134,22 @@ public enum CredentialIssuanceError: Error, LocalizedError {
       return "Proof type key attestation required."
     case .combinationOfBindingKeys:
       return "Combination of binding keys"
+    case .proofTypesNotSupportedByCredentialConfiguration:
+      return "Credential configuration does not support proof types required by wallet policy."
+    case .proofTypeNotSupportedByWalletPolicy:
+      return "The credential configuration requires a proof type that is not supported by the wallet's policy."
+    case .issuerMetadataNoAttestedProofType:
+      return "Issuer metadata does not advertise an attested proof type. Device-bound attestations require either proof_type 'attestation' or proof_type 'jwt' with key_attestation in the protected header."
+    case .bindingKeyNotAttestationCapable:
+      return "The binding key is not attestation-capable but the credential configuration or wallet policy requires key attestation."
+    case .noMatchingAlgorithmForProofType:
+      return "No matching cryptographic algorithm found between wallet policy and credential configuration for the required proof type."
+    case .keyIndexOutOfBounds(let index, let available):
+      return "Key index \(index) is out of bounds. Key attestation contains \(available) attested key(s). it requires kid='0' referencing the first key."
+    case .missingKid:
+      return "JWT proof header is missing 'kid' claim. It requires kid='0' for JWT proof with key attestation."
+    case .invalidKid(let expected, let actual):
+      return "JWT proof header 'kid' must be '\(expected)', found '\(actual)'."
     }
   }
 }
