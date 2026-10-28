@@ -55,13 +55,20 @@ public actor AuthorizationServerMetadataResolver: AuthorizationServerMetadataRes
     url: URL
   ) async -> Result<IdentityAndAccessManagementMetadata, Error> {
     
-    if let oauth = await fetchAuthorizationServerMetadata(
+    switch await fetchAuthorizationServerMetadata(
       fetcher: oauthFetcher,
       url: url
     ) {
+    case .found(let oauth):
       return .success(.oauth(oauth))
-      
-    } else if let oidc = await fetchOIDCProviderMetadata(
+    case .issuerMismatch:
+      // RFC 8414 Section 3.3: do not use the metadata and do not try other documents.
+      return .failure(ValidationError.error(reason: "Authorization server metadata issuer does not match \(url.absoluteString)"))
+    case .unavailable:
+      break
+    }
+
+    if let oidc = await fetchOIDCProviderMetadata(
       fetcher: oidcFetcher,
       url: url
     ) {
@@ -93,10 +100,16 @@ public actor AuthorizationServerMetadataResolver: AuthorizationServerMetadataRes
     return isIssuerBoundToDiscoveryURL(metadata.issuer, discoveryURL: url) ? metadata : nil
   }
 
+  private enum OAuthDiscovery {
+    case found(AuthorizationServerMetadata)
+    case issuerMismatch
+    case unavailable
+  }
+
   private func fetchAuthorizationServerMetadata(
     fetcher: Fetcher<AuthorizationServerMetadata>,
     url: URL
-  ) async -> AuthorizationServerMetadata? {
+  ) async -> OAuthDiscovery {
 
     // Spec-compliant discovery only: insert ".well-known/oauth-authorization-server"
     let wellKnown = ".well-known"
@@ -106,13 +119,14 @@ public actor AuthorizationServerMetadataResolver: AuthorizationServerMetadataRes
       url: url,
       modificationType: .insertPathComponents(wellKnown, server)
     ) else {
-      return nil
+      return .unavailable
     }
 
-    guard let metadata = try? await fetcher.fetch(url: insertedUrl).get() else {
-      return nil
+    guard let metadata = try? await fetcher.fetch(url: insertedUrl).get(),
+          metadata.issuer?.isEmpty == false else {
+      return .unavailable
     }
-    return isIssuerBoundToDiscoveryURL(metadata.issuer, discoveryURL: url) ? metadata : nil
+    return isIssuerBoundToDiscoveryURL(metadata.issuer, discoveryURL: url) ? .found(metadata) : .issuerMismatch
   }
 
   private func isIssuerBoundToDiscoveryURL(_ metadataIssuer: String?, discoveryURL: URL) -> Bool {
