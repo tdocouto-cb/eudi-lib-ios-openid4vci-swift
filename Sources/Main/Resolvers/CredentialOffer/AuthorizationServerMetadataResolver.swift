@@ -33,7 +33,20 @@ protocol AuthorizationServerMetadataResolverType {
 }
 
 public actor AuthorizationServerMetadataResolver: AuthorizationServerMetadataResolverType {
-  
+
+  private enum DiscoveryFailure: Error {
+    case notUsable
+    case issuerMismatch
+    case network(NetworkFailure)
+
+    var networkFailure: NetworkFailure? {
+      if case .network(let failure) = self {
+        return failure
+      }
+      return nil
+    }
+  }
+
   private let oidcFetcher: Fetcher<OIDCProviderMetadata>
   private let oauthFetcher: Fetcher<AuthorizationServerMetadata>
   
@@ -54,34 +67,36 @@ public actor AuthorizationServerMetadataResolver: AuthorizationServerMetadataRes
   public func resolve(
     url: URL
   ) async -> Result<IdentityAndAccessManagementMetadata, Error> {
-    
-    switch await fetchAuthorizationServerMetadata(
-      fetcher: oauthFetcher,
-      url: url
-    ) {
-    case .found(let oauth):
+
+    var networkFailure: NetworkFailure?
+
+    switch await fetchAuthorizationServerMetadata(fetcher: oauthFetcher, url: url) {
+    case .success(let oauth):
       return .success(.oauth(oauth))
-    case .issuerMismatch:
+    case .failure(.issuerMismatch):
       // RFC 8414 Section 3.3: do not use the metadata and do not try other documents.
       return .failure(ValidationError.error(reason: "Authorization server metadata issuer does not match \(url.absoluteString)"))
-    case .unavailable:
-      break
+    case .failure(let failure):
+      networkFailure = failure.networkFailure
     }
 
-    if let oidc = await fetchOIDCProviderMetadata(
-      fetcher: oidcFetcher,
-      url: url
-    ) {
+    switch await fetchOIDCProviderMetadata(fetcher: oidcFetcher, url: url) {
+    case .success(let oidc):
       return .success(.oidc(oidc))
+    case .failure(let failure):
+      networkFailure = failure.networkFailure ?? networkFailure
     }
-    
+
+    if let networkFailure {
+      return .failure(ValidationError.networkError(networkFailure))
+    }
     return .failure(ValidationError.error(reason: "Unable to fetch metadata"))
   }
-  
+
   private func fetchOIDCProviderMetadata(
     fetcher: Fetcher<OIDCProviderMetadata>,
     url: URL
-  ) async -> OIDCProviderMetadata? {
+  ) async -> Result<OIDCProviderMetadata, DiscoveryFailure> {
 
     // Spec-compliant discovery only: insert ".well-known/openid-configuration"
     let wellKnown = ".well-known"
@@ -91,25 +106,16 @@ public actor AuthorizationServerMetadataResolver: AuthorizationServerMetadataRes
       url: url,
       modificationType: .insertPathComponents(wellKnown, configuration)
     ) else {
-      return nil
+      return .failure(.notUsable)
     }
 
-    guard let metadata = try? await fetcher.fetch(url: insertedUrl).get() else {
-      return nil
-    }
-    return isIssuerBoundToDiscoveryURL(metadata.issuer, discoveryURL: url) ? metadata : nil
-  }
-
-  private enum OAuthDiscovery {
-    case found(AuthorizationServerMetadata)
-    case issuerMismatch
-    case unavailable
+    return await fetchDiscoveryDocument(fetcher: fetcher, url: insertedUrl, discoveryURL: url) { $0.issuer }
   }
 
   private func fetchAuthorizationServerMetadata(
     fetcher: Fetcher<AuthorizationServerMetadata>,
     url: URL
-  ) async -> OAuthDiscovery {
+  ) async -> Result<AuthorizationServerMetadata, DiscoveryFailure> {
 
     // Spec-compliant discovery only: insert ".well-known/oauth-authorization-server"
     let wellKnown = ".well-known"
@@ -119,14 +125,44 @@ public actor AuthorizationServerMetadataResolver: AuthorizationServerMetadataRes
       url: url,
       modificationType: .insertPathComponents(wellKnown, server)
     ) else {
-      return .unavailable
+      return .failure(.notUsable)
     }
 
-    guard let metadata = try? await fetcher.fetch(url: insertedUrl).get(),
-          metadata.issuer?.isEmpty == false else {
-      return .unavailable
+    return await fetchDiscoveryDocument(fetcher: fetcher, url: insertedUrl, discoveryURL: url) { $0.issuer }
+  }
+
+  private func fetchDiscoveryDocument<Metadata: Decodable & Sendable>(
+    fetcher: Fetcher<Metadata>,
+    url: URL,
+    discoveryURL: URL,
+    issuer: (Metadata) -> String?
+  ) async -> Result<Metadata, DiscoveryFailure> {
+    switch await fetcher.fetch(url: url) {
+    case .success(let metadata):
+      guard let metadataIssuer = issuer(metadata), !metadataIssuer.isEmpty else {
+        return .failure(.notUsable)
+      }
+      guard isIssuerBoundToDiscoveryURL(metadataIssuer, discoveryURL: discoveryURL) else {
+        return .failure(.issuerMismatch)
+      }
+      return .success(metadata)
+    case .failure(let error):
+      guard let failure = Self.networkFailure(url: url, fetchError: error) else {
+        return .failure(.notUsable)
+      }
+      return .failure(.network(failure))
     }
-    return isIssuerBoundToDiscoveryURL(metadata.issuer, discoveryURL: url) ? .found(metadata) : .issuerMismatch
+  }
+
+  private static func networkFailure(url: URL, fetchError: FetchError) -> NetworkFailure? {
+    switch fetchError {
+    case .networkError:
+      return NetworkFailure(stage: .GET, url: url, fetchError: fetchError)
+    case .invalidStatusCode(_, let code, _) where code != HTTPStatusCode.notFound: // 404 is not an error in this case
+      return NetworkFailure(stage: .GET, url: url, fetchError: fetchError)
+    default:
+      return nil
+    }
   }
 
   private func isIssuerBoundToDiscoveryURL(_ metadataIssuer: String?, discoveryURL: URL) -> Bool {
